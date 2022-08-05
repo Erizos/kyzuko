@@ -27,6 +27,7 @@ var schema = new mongoose.Schema({
     {
       value: String,
       suit: String,
+      weight: Number,
     },
   ],
   cardCount: {
