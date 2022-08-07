@@ -4,6 +4,7 @@ const {
   MessageActionRow,
   MessageButton,
   ClientVoiceManager,
+  MessageSelectMenu,
 } = require("discord.js");
 const { collection } = require("../../src/models/player");
 var Playerdb = require("../../src/models/player");
@@ -69,7 +70,7 @@ module.exports = {
         var weight = parseInt(values[x]);
         if (values[x] == "J" || values[x] == "Q" || values[x] == "K")
           weight = 10;
-        if (values[x] == "A") weight = 11;
+        if (values[x] == "A") weight = 1;
         let card = { Value: values[x], Suit: suits[i], Weight: weight };
         deck.push(card);
       }
@@ -163,8 +164,7 @@ module.exports = {
     const secondDealerCard = deck.slice(1, 2);
     deck.splice(0, 2);
     const dealerId = await Playerdb.findOne({ role: "Dealer" });
-    const user = await client.users.fetch(dealerId.discId);
-    playerArray.push(user.id);
+    const dealerUser = await client.users.fetch(dealerId.discId);
 
     Playerdb.findOneAndUpdate(
       {
@@ -201,7 +201,7 @@ module.exports = {
         );
       }
     );
-    let sentDealerCardMessage = await user.send({
+    let sentDealerCardMessage = await dealerUser.send({
       content: "Bài của mày đây!",
       files: [
         {
@@ -215,6 +215,7 @@ module.exports = {
       ],
     });
     messageArray.push(sentDealerCardMessage.id);
+    playerArray.push(dealerId.discId);
     // cooldown wait for the shuffle then start the game
     startEmbed.setDescription("Đang chia bài cho từng đứa!");
     message.channel.send({ embeds: [startEmbed] });
@@ -235,34 +236,183 @@ module.exports = {
           .setStyle("DANGER")
       );
 
+    const listOfPlayer = await Playerdb.find({ role: "Player" });
+    const playerList = new MessageActionRow().addComponents(
+      new MessageSelectMenu()
+        .setCustomId("player-select")
+        .setPlaceholder("Chọn người mà mày muốn xét bài")
+        .setMinValues(1)
+        .setMaxValues(checkAmount)
+        .addOptions(
+          listOfPlayer.map((userInfo) => ({
+            label: userInfo.discName,
+            description: "",
+            value: userInfo.discName,
+          }))
+        )
+    );
+
     // turn based function
     let i = 0;
     async function loop() {
-      let playerPoint = getPoint(playerArray[i]);
-      startEmbed.setDescription(`Tới lượt của <@${playerArray[i]}>`);
-      message.channel.send({ embeds: [startEmbed] });
-      const editor = await client.users.createDM(playerArray[i]);
       let DMPlayer = playerArray[i];
-      const edit = await editor.messages.fetch(messageArray[i]);
-      playerPoint.then(async (playerPoint) => {
-        edit.edit({
-          content: `Tới mày kìa! Hiện có \`${playerPoint}\` nút`,
-          components: [row],
+      //  check người chơi có phải là dealer ko, nếu ko thì skip lệnh if
+      const dealerExist = await Playerdb.countDocuments({
+        discId: playerArray[i],
+        role: "Dealer",
+      });
+      if (dealerExist > 0) {
+        startEmbed.setDescription(`Tới lượt của nhà cái <@${playerArray[i]}>`);
+        message.channel.send({ embeds: [startEmbed] });
+        return dealerLoop();
+      } else {
+        let playerPoint = getPoint(playerArray[i]);
+        startEmbed.setDescription(`Tới lượt của <@${playerArray[i]}>`);
+        message.channel.send({ embeds: [startEmbed] });
+        const editor = await client.users.createDM(playerArray[i]);
+
+        const edit = await editor.messages.fetch(messageArray[i]);
+        playerPoint.then(async (playerPoint) => {
+          edit.edit({
+            content: `Tới mày kìa! Hiện có \`${playerPoint}\` nút`,
+            components: [row],
+          });
+        });
+        const filter = () => {
+          return true;
+        };
+        const collector = edit.createMessageComponentCollector({
+          filter,
+          time: 1000 * 30,
+        });
+
+        collector.on("collect", async (y) => {
+          if (y.customId === "draw") {
+            const amountOfCards = await Playerdb.aggregate([
+              {
+                $match: { discId: DMPlayer },
+              },
+              {
+                $project: {
+                  cards: { $size: "$card" },
+                },
+              },
+            ]);
+            const cardNumber = amountOfCards.map(function (item) {
+              return item["cards"];
+            });
+            if (cardNumber[0] > 4) {
+              return y.update({
+                content: "Đủ 5 lá rồi má!",
+                components: [row],
+              });
+            }
+            let card = dealCard(deck);
+            // console.log(`lá bài được rút: ${card.Value}-${card.Suit}`);
+            Playerdb.findOneAndUpdate(
+              {
+                discId: DMPlayer,
+              },
+              {
+                $push: {
+                  card: [
+                    {
+                      value: card.Value,
+                      suit: card.Suit,
+                      weight: card.Weight,
+                    },
+                  ],
+                },
+              },
+              {
+                new: true,
+              },
+              async (err, doc) => {
+                if (err) {
+                  console.log(err);
+                }
+                // console.log(" đã nhét vào db: " + doc);
+                const cardlist = await Playerdb.findOne({
+                  discId: DMPlayer,
+                });
+                let nut = getPoint(DMPlayer);
+                nut.then(async (value) => {
+                  await y.update({
+                    content: `Đã rút thêm 1 lá, hiện có \`${value}\` nút`,
+                    files: cardlist.card.map((card) => ({
+                      attachment: `imgs/cards/${card.suit}-${card.value}.png`,
+                      name: `${card.suit}-${card.value}.png`,
+                    })),
+                    components: [row],
+                  });
+                });
+                // console.log(`lá bài hiện tại ${cardlist}`);
+              }
+            );
+          } else if (y.customId === "stop") {
+            const amountOfCards = await Playerdb.aggregate([
+              {
+                $match: { discId: DMPlayer },
+              },
+              {
+                $project: {
+                  cards: { $size: "$card" },
+                },
+              },
+            ]);
+            const cardNumber = amountOfCards.map(function (item) {
+              return item["cards"];
+            });
+            startEmbed.setDescription(
+              `<@${playerArray[i]}> đã dằn với \`${cardNumber[0]}\` lá`
+            );
+            message.channel.send({ embeds: [startEmbed] });
+            collector.stop();
+            if (i > checkAmount) {
+              ++i;
+              loop();
+            }
+
+            return y.update({
+              content: "done",
+              components: [],
+            });
+          }
+        });
+
+        collector.on("end", async (collection) => {
+          edit.edit({
+            content: "Hết thời gian rồi, đã chuyển lượt cho người kế tiếp",
+            components: [],
+          });
+
+          ++i;
+          loop();
+        });
+      }
+    }
+    // let neededClear = setTimeout(loop, 1000);
+    loop();
+
+    function dealerLoop() {
+      let dealerPoint = getPoint(message.author.id);
+      dealerPoint.then(async (dealerPoint) => {
+        sentDealerCardMessage.edit({
+          content: `Tới mày kìa! Hiện có \`${dealerPoint}\` nút`,
+          components: [playerList, row],
         });
       });
       const filter = () => {
         return true;
       };
-      const collector = edit.createMessageComponentCollector({
+      const collector = sentDealerCardMessage.createMessageComponentCollector({
         filter,
-        time: 1000 * 30,
       });
-
       collector.on("collect", async (y) => {
         if (y.customId === "draw") {
           const amountOfCards = await Playerdb.aggregate([
             {
-              $match: { discId: DMPlayer },
+              $match: { discId: message.author.id },
             },
             {
               $project: {
@@ -273,25 +423,25 @@ module.exports = {
           const cardNumber = amountOfCards.map(function (item) {
             return item["cards"];
           });
+          console.log(cardNumber[0]);
           if (cardNumber[0] > 4) {
-            return y.update({
+            return await y.update({
               content: "Đủ 5 lá rồi má!",
-              components: [row],
+              components: [playerList, row],
             });
           }
-          let card = dealCard(deck);
-          // console.log(`lá bài được rút: ${card.Value}-${card.Suit}`);
+          let dealerCard = dealCard(deck);
           Playerdb.findOneAndUpdate(
             {
-              discId: DMPlayer,
+              discId: message.author.id,
             },
             {
               $push: {
                 card: [
                   {
-                    value: card.Value,
-                    suit: card.Suit,
-                    weight: card.Weight,
+                    value: dealerCard.Value,
+                    suit: dealerCard.Suit,
+                    weight: dealerCard.Weight,
                   },
                 ],
               },
@@ -303,55 +453,45 @@ module.exports = {
               if (err) {
                 console.log(err);
               }
-              // console.log(" đã nhét vào db: " + doc);
-              const cardlist = await Playerdb.findOne({
-                discId: DMPlayer,
-              });
-              let nut = getPoint(DMPlayer);
-              nut.then(async (value) => {
-                await y.update({
-                  content: `Đã rút thêm 1 lá, hiện có \`${value}\` nút`,
-                  files: cardlist.card.map((card) => ({
-                    attachment: `imgs/cards/${card.suit}-${card.value}.png`,
-                    name: `${card.suit}-${card.value}.png`,
-                  })),
-                  components: [row],
-                });
-              });
-              // console.log(`lá bài hiện tại ${cardlist}`);
             }
           );
+          const cardlist = await Playerdb.findOne({
+            discId: message.author.id,
+          });
+          dealerPoint.then(async (value) => {
+            await y.update({
+              content: `Đã rút thêm 1 lá, hiện có \`${value}\` nút`,
+              files: cardlist.card.map((card) => ({
+                attachment: `imgs/cards/${card.suit}-${card.value}.png`,
+                name: `${card.suit}-${card.value}.png`,
+              })),
+              components: [playerList, row],
+            });
+          });
         } else if (y.customId === "stop") {
+          console.log("The dealer has stopped");
           collector.stop();
-          clearTimeout(neededClear);
-          if (i > checkAmount) {
-            ++i;
-            loop();
+          for (let i = 0; i < playerArray.length; ++i) {
+            const checkResult = await Playerdb.findOne({
+              discId: message.author.id,
+            });
+            // console.log(checkResult);
           }
-
           return y.update({
             content: "done",
             components: [],
           });
+        } else if (y.customId === "player-select") {
+          const chosenPlayers = y.values[0];
+          console.log(chosenPlayers);
+          const index = y.values.indexOf(chosenPlayers);
+          y.values.splice(index, 1);
+          console.log(listOfPlayer);
+          dealerLoop();
         }
       });
-
-      collector.on("end", (collection) => {
-        edit.edit({
-          content: "Hết thời gian rồi, đã chuyển lượt cho người kế tiếp",
-          components: [],
-        });
-        if (i < checkAmount - 1) {
-          ++i;
-          console.log("skipped another loop");
-          loop();
-        } else {
-          startEmbed.setDescription("The game ended!");
-          message.channel.send({ embeds: [startEmbed] });
-        }
-      });
+      collector.on("end", () => {});
     }
-    let neededClear = setTimeout(loop, 1000);
 
     // đếm nút
     async function getPoint(player) {
@@ -363,75 +503,47 @@ module.exports = {
       const howManyCards = allCard.card.length;
       let point = 0;
       let result = [];
-      if (howManyCards > 2) {
-        // Nếu có con Ace
-        console.log(foundAce);
-        if (foundAce) {
-          point = 0;
-          for (let i = 0; i < howManyCards; ++i) {
-            result = allCard.card.map((a) => a.weight);
-            point += result[i];
-          }
-          //Nếu tổng quân bài với A lớn hơn 11 thì A = 1
-          if (point > 21) {
-            Playerdb.findOneAndUpdate(
-              {
-                discId: player,
+
+      // Nếu có con Ace
+      console.log(foundAce);
+      if (foundAce) {
+        point = 0;
+        for (let i = 0; i < howManyCards; ++i) {
+          result = allCard.card.map((a) => a.weight);
+          point += result[i] + 10;
+        }
+        //Nếu tổng quân bài với A lớn hơn 11 thì A = 1
+        if (point < 21) {
+          Playerdb.findOneAndUpdate(
+            {
+              discId: player,
+              card: {
+                value: "A",
+              },
+            },
+            {
+              $set: {
                 card: {
-                  value: "A",
+                  weight: 11,
                 },
               },
-              {
-                $set: {
-                  card: {
-                    weight: 10,
-                  },
-                },
-              }
-            );
-            point = 0;
-            for (let i = 0; i < howManyCards; ++i) {
-              result = allCard.card.map((a) => a.weight);
-              point += result[i];
-            }
-            if (point > 21) {
-              Playerdb.findOneAndUpdate(
-                {
-                  discId: player,
-                  card: {
-                    value: "A",
-                  },
-                },
-                {
-                  $set: {
-                    card: {
-                      weight: 1,
-                    },
-                  },
-                }
-              );
+            },
+            async (err, doc) => {
               point = 0;
               for (let i = 0; i < howManyCards; ++i) {
                 result = allCard.card.map((a) => a.weight);
                 point += result[i];
               }
-              return point;
-            } else return point;
-          }
-        } else {
-          result = allCard.card.map((i) => i.weight);
-          for (let i = 0; i < howManyCards; ++i) {
-            point += result[i];
-          }
-          return point;
+            }
+          );
         }
       } else {
         result = allCard.card.map((i) => i.weight);
         for (let i = 0; i < howManyCards; ++i) {
           point += result[i];
         }
-        return point;
       }
+      return point;
     }
 
     function checkInitialCard(
@@ -449,7 +561,7 @@ module.exports = {
         (firstCardValue == "A" && secondCardWeight == "10") ||
         (firstCardWeight == "10" && firstCardValue == "A")
       ) {
-        result = "XÌ BẰNG";
+        result = "XÌ BÀN";
         return result;
       }
       return result;

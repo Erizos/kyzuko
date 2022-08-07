@@ -30,7 +30,7 @@ var schema = new mongoose.Schema({
       weight: Number,
     },
   ],
-  cardCount: {
+  totalWeight: {
     type: Number,
     require: true,
   },
