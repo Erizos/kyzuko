@@ -138,6 +138,7 @@ module.exports = {
         secondCard[0].Value,
         secondCard[0].Weight
       );
+      console.log(checkCond);
       let sentCardMessage = await user.send({
         content: checkCond,
         files: [
@@ -507,13 +508,13 @@ module.exports = {
       // Nếu có con Ace
       console.log(foundAce);
       if (foundAce) {
-        point = 0;
         for (let i = 0; i < howManyCards; ++i) {
           result = allCard.card.map((a) => a.weight);
-          point += result[i] + 10;
+          point += result[i];
         }
         //Nếu tổng quân bài với A lớn hơn 11 thì A = 1
-        if (point < 21) {
+        if (point + 10 < 21) {
+          point = 0;
           Playerdb.findOneAndUpdate(
             {
               discId: player,
@@ -555,6 +556,7 @@ module.exports = {
       let result = "Bài của mày đây!";
       if (firstCardValue == "A" && secondCardValue == "A") {
         result = "XÌ DÁCH";
+
         return result;
       }
       if (
